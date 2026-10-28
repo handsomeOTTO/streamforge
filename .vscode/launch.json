@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: Apache-2.0
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "StreamForge: Main service",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "cwd": "${workspaceFolder}",
+      "python": "${command:python.interpreterPath}",
+      "console": "integratedTerminal",
+      "subProcess": true,
+      "justMyCode": true,
+      "env": { "PYTHONUNBUFFERED": "1" }
+    },
+    {
+      "name": "StreamForge: Simulate client",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/simulate_client.py",
+      "cwd": "${workspaceFolder}",
+      "python": "${command:python.interpreterPath}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": { "PYTHONUNBUFFERED": "1" }
+    }
+  ]
+}

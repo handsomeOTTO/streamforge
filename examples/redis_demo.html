@@ -1,0 +1,70 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StreamForge live demo</title>
+<style>
+body{font:16px system-ui,sans-serif;background:#101a28;color:#e6eef8;margin:0;padding:36px}
+main{max-width:1160px;margin:auto}h1{font-size:30px;margin-bottom:8px}p{color:#aebed0;line-height:1.6}
+.flow,.stats{display:flex;gap:12px;flex-wrap:wrap;margin:24px 0}.flow span,.stat{background:#1b2b40;border:1px solid #334861;border-radius:10px;padding:16px}
+.stat{flex:1;min-width:130px}.stat strong{display:block;font-size:28px;margin-top:5px}
+button,a{font:inherit;color:#83ddd0}button{background:#214b4b;border:1px solid #49867d;border-radius:7px;padding:10px 18px;cursor:pointer;margin-right:10px}
+button:disabled{opacity:.5;cursor:wait}table{width:100%;border-collapse:collapse;background:#182639;margin-top:18px}
+th,td{text-align:left;padding:12px;border-bottom:1px solid #334861;vertical-align:top}th{color:#aebed0;font-weight:500}
+td:first-child{font:12px monospace;overflow-wrap:anywhere;max-width:280px}.ok{color:#80ddaf}.bad{color:#ffad9f}
+pre{background:#182639;padding:16px;overflow:auto;border-radius:10px;max-height:440px}#message{min-height:26px}
+@media(max-width:700px){body{padding:16px}.table{overflow-x:auto}table{min-width:700px}}
+</style>
+<main>
+<h1>StreamForge live workflow</h1>
+<p>Real Redis, spawned workers and typed results. Synthetic PNG input; metadata operators only. No detection algorithm or quality verdict.</p>
+<div class="flow"><span>Redis input + image key</span><span>Branch dispatch</span><span>CVO worker processes</span><span>Aggregate</span><span>Redis output</span></div>
+<button id="send">Send 3 demo tasks</button><button id="toggle">Stop workflow</button><a href="/docs">API explorer</a>
+<p id="message" role="status" aria-live="polite">Connecting...</p>
+<div class="stats"><div class="stat">State<strong id="state">-</strong></div><div class="stat">Completed<strong id="completed">0</strong></div><div class="stat">Failed<strong id="failed">0</strong></div><div class="stat">Pending<strong id="pending">0</strong></div></div>
+<p id="runtime"></p>
+<h2>Published results</h2><p>Each batch contains two inspection tasks and one health task. Results are read directly from their Redis output lists. Latest 20 per destination are shown.</p>
+<div class="table"><table><thead><tr><th>Task</th><th>Kind</th><th>Status</th><th>Branch outcomes</th><th>Image bytes</th></tr></thead><tbody id="results"></tbody></table></div>
+<details><summary>Raw typed snapshot</summary><pre id="raw"></pre></details>
+</main>
+<script>
+let running=false;
+const byId=id=>document.getElementById(id);
+async function request(path,method='GET'){
+  const response=await fetch(path,{method});const value=await response.json();
+  if(!response.ok)throw new Error(value.detail||`HTTP ${response.status}`);return value;
+}
+async function refresh(){
+  try{
+    const data=await request('/demo/results');const status=data.status;running=status.state==='running';
+    for(const key of ['state','completed','failed','pending'])byId(key).textContent=status[key];
+    byId('toggle').textContent=running?'Stop workflow':'Start workflow';
+    byId('runtime').textContent=`Input DB ${data.input_db} → output DB ${data.output_db} | Worker PIDs: ${status.worker_pids.join(', ')||'none'} | Configuration revision ${status.revision}`;
+    byId('results').replaceChildren();
+    for(const result of data.results){
+      const row=document.createElement('tr');
+      const branches=(result.inspection?.branches||[]).map(b=>`${b.branch}: ${b.status} [${b.tags.join(', ')}]`).join(' / ');
+      const bytes=result.payload?atob(result.payload.image.content_base64).length:0;
+      for(const value of [result.task_id,result.kind,result.status,branches,bytes]){
+        const cell=document.createElement('td');cell.textContent=value;row.append(cell);
+      }
+      row.children[2].className=result.status==='succeeded'?'ok':'bad';byId('results').append(row);
+    }
+    byId('raw').textContent=JSON.stringify(data,null,2);
+    if(byId('message').textContent==='Connecting...')byId('message').textContent='Ready. Send a batch to exercise the full workflow.';
+  }catch(error){byId('message').textContent=error.message;}
+}
+byId('send').onclick=async()=>{
+  byId('send').disabled=true;
+  try{const batch=await request('/demo/tasks','POST');byId('message').textContent=`Queued ${batch.task_ids.length} tasks in Redis.`;await refresh();}
+  catch(error){byId('message').textContent=error.message;}finally{byId('send').disabled=false;}
+};
+byId('toggle').onclick=async()=>{
+  byId('toggle').disabled=true;
+  try{await request(running?'/stop':'/start','POST');await refresh();}
+  catch(error){byId('message').textContent=error.message;}finally{byId('toggle').disabled=false;}
+};
+refresh();setInterval(refresh,1000);
+</script>
+</html>

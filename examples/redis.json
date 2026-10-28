@@ -1,0 +1,18 @@
+{
+  "connection": {"host": "127.0.0.1", "port": 6379, "db": 0},
+  "output_db": 1,
+  "queues": {
+    "input": "streamforge:tasks",
+    "processing": "streamforge:processing",
+    "output": "streamforge:results",
+    "rejected": "streamforge:rejected",
+    "health_output": "streamforge:health:results"
+  },
+  "pipeline": {"name": "inspection", "queue_capacity": 8, "max_pending": 16},
+  "workers": 2,
+  "poll_interval": 0.02,
+  "task_timeout": 30.0,
+  "branches": [
+    {"name": "main", "operators": [{"name": "tag", "parameters": {"tag": "processed"}}]}
+  ]
+}

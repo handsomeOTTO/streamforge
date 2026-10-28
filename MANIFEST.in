@@ -1,0 +1,13 @@
+include LICENSE NOTICE README.md README.zh-CN.md CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md CHANGELOG.md
+include .editorconfig .gitattributes
+include main.py simulate_client.py
+recursive-include docs *.md *.json *.svg
+recursive-include requirements *.txt
+recursive-include examples *.py *.html *.json *.jsonl
+recursive-include tests *.py
+recursive-include tools *.py
+recursive-include .github *.md *.yml
+global-exclude *.local.json *.private.json .env .env.*
+prune outputs
+prune logs
+global-exclude *.log *.log.*
