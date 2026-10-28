@@ -4,167 +4,143 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A Python inspection and streaming framework with strict Pydantic v2 contracts, a shared processing base, configurable CVO branches, and an operational Redis-to-Redis workflow.
+StreamForge is a Python framework for building image-processing services. It runs configurable operator chains in worker processes, coordinates parallel branches, and returns structured results through a Redis-backed task workflow.
 
-The workflow covers task ingestion, image lookup, dispatch, processing, result formatting/aggregation, publication, and runtime controls. The framework transports opaque image bytes and typed findings. Detection algorithms are supplied through plugins; model weights and inference implementations are not bundled.
+Applications supply the processing algorithms. StreamForge manages task validation, queues, worker lifecycles, result aggregation, and service controls. The core SDK can also be embedded in Python applications or used for JSONL processing without Redis.
 
-See the [architecture and sequence diagrams](docs/architecture.md) for the system overview, process boundaries, task processing, lifecycle controls and recovery.
+## Features
 
-## Quick start
+- **Typed contracts:** strict Pydantic models for images, tasks, operator parameters, findings, and results.
+- **Multiprocess execution:** shared worker infrastructure with bounded queues and backpressure.
+- **Composable operators:** ordered operator chains, per-worker resource hooks, and explicit plugin registration.
+- **Parallel branches:** configurable worker counts, task-level branch selection, and deterministic result aggregation.
+- **Redis integration:** image-key lookup, acknowledged task claims, normal and health-result queues, and explicit recovery.
+- **Service controls:** HTTP endpoints for start/stop, health, version, and validated configuration updates.
 
-Requires Python 3.11 or newer. From the repository root in PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e '.[api,redis,dev]'
-.\.venv\Scripts\python.exe examples/image_pipeline.py
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-For just the core SDK and JSONL interface, use `pip install -e .`. Pydantic is the core's only direct runtime dependency.
-
-## Direct IDE startup and independent image client
-
-Debug the root `main.py` directly to start the Redis service, workers and HTTP controls on port 8001. In a separate IDE run configuration or terminal, run `simulate_client.py` to send one image, wait for its result, and save the returned image and full result JSON under the ignored `outputs/` directory.
-
-```powershell
-python main.py
-# Run separately after the service is ready.
-python simulate_client.py
-# Send your own image instead of the built-in synthetic PNG.
-python simulate_client.py --image C:\images\sample.png
-```
-
-Both scripts use root `debug.local.json` when it exists, otherwise `examples/redis.json`; `--config PATH` overrides that choice. They require the configured Redis server to be running. The client uses the same configured queues and does not start workers. Enable subprocess debugging to hit operator breakpoints. See the [IDE debugging guide](docs/development.md#ide-debugging) for details.
-
-Service logs use `[timestamp][module][line][level]: message`. Each image produces a `↓ redis =>` receipt and an `↑ redis =>` publication line at INFO level, with task identifiers and elapsed time; intermediate processing details are DEBUG. A plain copy is written to `logs/streamforge.log` beside the selected configuration and rotated daily.
-
-## Redis inspection system
-
-With Redis >=6.2 running at the configured address:
-
-```powershell
-python examples/redis_demo.py --config examples/redis.json
-python examples/redis_roundtrip.py --config examples/redis.json
-python -m streamforge redis --config examples/redis.json
-python -m streamforge redis-serve --config examples/redis.json
-```
-
-The browser demo runs at [localhost:8000](http://127.0.0.1:8000), with a send-batch button, live counters, worker identifiers and actual Redis results. The roundtrip command demonstrates the same workflow in a terminal and cleans up its disposable keys. The other commands run the message-processing service and HTTP controls. See the [operational guide](docs/redis-workflow.md) and [workflow guide](docs/workflow.md).
-
-```text
-src/streamforge/
-  models.py, processor.py, worker.py, pipeline.py, operators.py
-  messages.py         Task/image-reference/result message contracts
-  application/
-    models.py         Service settings, runtime status and run reports
-    configuration.py  Concrete plugin configuration and OpenAPI schemas
-    service.py        TaskService: end-to-end orchestration and backpressure
-    controller.py     ServiceController: start/stop and configuration persistence
-    api.py            Optional HTTP system controls
-  inspection/
-    models.py         Typed findings, branch outcomes and inspection summaries
-    workflow.py       Background dispatch and deterministic branch aggregation
-  transports/redis/
-    models.py         Redis connection, queue settings and recovery report
-    transport.py      Recoverable claims, image lookup and acknowledged publication
-```
-
-Application code owns the processing lifecycle; the Redis adapter owns database I/O and imports the shared message contracts. Redis is the currently supported operational backend. Configuration JSON defines connection settings, queues and processing branches. See the [package layout](docs/development.md#package-layout) for application and transport imports.
-
-Processing branches are configured as ordered operator chains. A submitted inspection starts processing without requiring a result consumer. The default registry contains metadata handling only; an empty finding list is not a quality verdict. A separate generic input/output adapter is also available below.
-
-```powershell
-# Process each input line immediately, preserving image bytes.
-Get-Content -LiteralPath examples/images.jsonl | python -m streamforge run
-
-# Append generic metadata. The output file must not already exist.
-python -m streamforge run --input examples/images.jsonl --output results.jsonl --tag received
-
-# Start the optional HTTP adapter with two CVO workers.
-python -m streamforge serve --workers 2
-```
-
-HTTP documentation: [Swagger UI](http://127.0.0.1:8000/docs). `GET /health` reports status; `POST /tasks` submits a task and waits for its result.
-
-## Contracts
-
-```json
-{
-  "task_id": "frame-001",
-  "payload": {
-    "image": {"media_type": "image/png", "content_base64": "aW1hZ2U="},
-    "tags": []
-  }
-}
-```
-
-Omit `task_id` to generate one. Identifiers contain 1–128 ASCII letters, digits, underscores, dots, or hyphens. The Base64 above illustrates transport; `examples/images.jsonl` contains a runnable PNG task. Images are opaque bytes, limited to 16 MiB each. The framework validates Base64 encoding, not whether bytes match the declared format.
-
-Success returns `status="succeeded"`, a typed `payload`, and a null `error`. Failure returns `status="failed"`, a null `payload`, and an error with `stage`, `error_type`, and `message`. Unknown fields and implicit numeric coercion are rejected. JSON is a transport format; the SDK accepts model instances.
-
-## SDK
-
-```python
-from streamforge import ImageData, ImagePayload, PipelineConfig, Task
-from streamforge.image import image_pipeline
-
-
-def main():
-    with image_pipeline(
-        config=PipelineConfig(queue_capacity=8, max_pending=16),
-        workers=2,
-    ) as pipeline:
-        image = ImageData.from_bytes(b"opaque-image-bytes", media_type="image/png")
-        task = Task[ImagePayload](payload=ImagePayload(image=image))
-        pipeline.submit(task, timeout=1.0)
-        result = pipeline.result(task.task_id, timeout=10.0)
-        print(result.status)
-
-
-if __name__ == "__main__":
-    main()
-```
-
-Windows uses `spawn`. Put application execution behind `if __name__ == "__main__"` and define processors, parameters, and operators at importable module scope. Imports do not start workers.
-
-The core supports any concrete `StrictModel` payload. All stages in a pipeline use the same payload schema; declare new fields explicitly in your own model.
-
-## Stages and CVO
-
-Inherit `BaseProcessor[Payload, Parameters]`, declare `parameters_model`, and implement `process`. Optional `setup/teardown` hooks own process-local resources. The framework supplies one queue loop, validation, and error handling.
-
-CVO is available by default. An empty chain passes images through; configured operators execute in order. Operators declare a strict parameter model and `process(payload)`. They may be ordinary classes or use the convenience base. The scheduler does not inspect their private data or load layers, templates, or engineering files. See the [extension guide](docs/extension-guide.md).
+## How it works
 
 ```mermaid
 flowchart LR
-    In[Typed input] --> Q1[Bounded queue]
-    Q1 --> S1[Stage workers]
-    S1 --> Q2[Bounded queue]
-    Q2 --> CVO[CVO operator chain]
-    CVO --> Out[Typed results]
+    Input[Redis tasks and images] --> Dispatch[Branch dispatch]
+    Dispatch --> Workers[Operator worker pools]
+    Workers --> Aggregate[Result aggregation]
+    Aggregate --> Output[Redis results]
 ```
 
-## Concurrency and lifecycle
+A producer stores image bytes and submits a task containing the image key. The service validates the task, loads the image, and dispatches it to the selected branches. Each branch runs its operators in order. Once all selected branches finish, the service combines their outcomes and publishes one task result.
 
-- `submit` queues a task; `result(task_id)` retrieves a specific result; `receive()` retrieves the next completed result. Retrieval consumes the result and releases capacity.
-- `max_pending` bounds processing tasks and completed, unclaimed results. Stage queues have separate capacity limits.
-- Submission timeouts bound capacity and queue-admission waits; validation and serialization happen before that admission deadline. The Redis service also enforces a separate task processing timeout.
-- `map(tasks)` prefetches a bounded window and yields in input order. It requires exclusive pipeline use and an iterator that supplies input promptly. For sparse live input, use `submit/result` or concurrent `submit/receive`.
-- JSONL processes one line at a time for immediate output. Use SDK `map` or concurrent HTTP requests for multiple frames in flight.
-- A task failure skips downstream stages while later tasks continue. There are no automatic retries or implied exactly-once side effects.
-- Initialization failure or unexpected worker exit fails the pipeline and provides errors for unfinished tasks.
-- `discard(task_id)` abandons a result and releases capacity without interrupting a running operator. Internal dispatch identifiers isolate late results from reused task identifiers.
-- `close()` drains stages and returns `ShutdownReport`, including any pipeline-level error. On timeout it terminates remaining workers and fails unfinished tasks. Context managers call it automatically; call again to inspect the same report. Cleanup exceptions and abnormal worker exits are reported as non-graceful shutdowns.
+| Concept | Purpose |
+| --- | --- |
+| Operator | A processing step that accepts and returns a typed payload. |
+| Operator chain | A sequence of operators executed by `CVOProcessor` inside a worker. |
+| Branch | An independently configured processing path with its own worker pool. |
+| Finding | A plugin-produced observation with a label, confidence, and optional geometry or measurements. |
+| Result | The task's success/failure status, payload or error, and branch summary. |
 
-HTTP uses 422 for validation, 409 for duplicate pending identifiers, 429 for capacity exhaustion, 504 for result timeout, and 503 for unavailable pipelines. Processing failures use HTTP 200 with a typed failure result. Timed-out requests discard results to release capacity. One application lifespan owns one pipeline.
+See the [architecture diagrams](docs/architecture.md) for process boundaries and execution sequences.
 
-## Scope
+## Getting started
 
-Core Pipeline supplies sequential stages; InspectionWorkflow adds configurable fan-out/fan-in, and the Redis service supplies an operational source-to-sink chain with recoverable claims. It remains a single-host processing system and does not include general DAG execution, distributed coordination, Kafka connectors, cross-server transactions or shared-memory images. Changes to active worker configuration require stopping and rebuilding. Redis recovery is at least once, not exactly once. Serialization copies data and Base64 adds overhead; size capacities for the workload. Operators have no hard real-time guarantee.
+Requires **Python 3.11+**. Run the commands below from the repository root in a Python virtual environment.
 
-## Community
+### Run the core example
 
-Licensed under [Apache-2.0](LICENSE), with attribution in [NOTICE](NOTICE). See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), [SECURITY.md](SECURITY.md), and [CHANGELOG.md](CHANGELOG.md).
+```sh
+python -m pip install -e .
+python examples/image_pipeline.py
+```
 
-The [development guide](docs/development.md) covers checks and releases. The [provenance record](docs/provenance.md) describes source and dependency boundaries. [Verification results](docs/verification.md) distinguish local checks from hosted CI that has not run yet.
+The example sends six synthetic PNG tasks through two worker processes, adds metadata tags, and prints their results. It runs without Redis or an HTTP server.
+
+### Run the Redis service
+
+Requires **Redis 6.2+** and the service dependencies:
+
+```sh
+python -m pip install -e ".[api,redis]"
+```
+
+Copy `examples/redis.json` to `redis.local.json` and set the Redis connection. The sample uses input database `0`, output database `1`, and a single branch with the built-in metadata tag operator. Start Redis at the configured address, then start the service:
+
+```sh
+python main.py --config redis.local.json
+```
+
+In a second terminal, send a sample image and wait for its result:
+
+```sh
+python simulate_client.py --config redis.local.json
+```
+
+The client saves the returned image and result JSON under `outputs/`. Add `--image path/to/image.png` to process a local file. With the sample configuration, a successful result includes the `processed` tag and preserves the input image bytes.
+
+The control API is available at [localhost:8001/docs](http://127.0.0.1:8001/docs). Configuration changes use a stop → update → start sequence. Connection settings, message schemas, recovery, and the browser demo are covered in the [Redis guide](docs/redis-workflow.md).
+
+### Other entry points
+
+| Interface | Command |
+| --- | --- |
+| JSONL file processing | `python -m streamforge run --input examples/images.jsonl --output results.jsonl` |
+| In-memory HTTP task API | `python -m streamforge serve --workers 2` |
+| Redis browser demo | `python examples/redis_demo.py --config redis.local.json` |
+| Redis terminal roundtrip | `python examples/redis_roundtrip.py --config redis.local.json` |
+
+The JSONL output file must not already exist. The HTTP task API needs `.[api]`; Redis examples need `.[redis]`, and the browser demo also needs `.[api]`. Run each server example separately. The in-memory API and browser demo use port `8000` by default.
+
+## Writing an operator
+
+Define a parameter model and implement `process`. The processing base supplies configuration and output validation:
+
+```python
+from streamforge import BaseProcessor, ImagePayload, StrictModel
+
+
+class LabelParameters(StrictModel):
+    label: str
+
+
+class LabelOperator(BaseProcessor[ImagePayload, LabelParameters]):
+    parameters_model = LabelParameters
+
+    def process(self, payload: ImagePayload) -> ImagePayload:
+        return payload.model_copy(update={"tags": [*payload.tags, self.parameters.label]})
+```
+
+Register the operator by name in an application entry point, then reference it in a branch configuration. Operators can also be ordinary classes implementing the same parameter and processing contract. Optional `setup` and `teardown` hooks manage worker-local resources.
+
+The [extension guide](docs/extension-guide.md) covers registration, custom stages, private intermediate data, and returning typed findings. Keep processor and operator classes at module scope, and place application execution behind `if __name__ == "__main__"` so workers can start with `spawn`.
+
+## Runtime behavior
+
+- Processing runs on one host. Branches can run concurrently, and each worker executes one task's operators in order.
+- Queue capacity and pending-result limits bound admission. Slow consumers apply backpressure.
+- Images are opaque encoded bytes, up to **16 MiB** per image. Operators own decoding and analysis. No inference models or detection algorithms are bundled.
+- Failed branches produce structured outcomes. A task succeeds only when every selected branch succeeds. Empty findings alone are not a quality decision.
+- Redis delivery is **at least once**. Cross-database interruption can lead to duplicate results, so consumers and side-effecting operators must tolerate replay.
+- Shutdown drains accepted work within a configured budget. If claims remain in the processing list, stop the service owner and run the explicit recovery command before restarting. See [recovery semantics](docs/redis-workflow.md#delivery-and-recovery).
+
+## Documentation
+
+- [Architecture and sequence diagrams](docs/architecture.md)
+- [Task workflow and component responsibilities](docs/workflow.md)
+- [Redis configuration, messages, and recovery](docs/redis-workflow.md)
+- [Stage and operator extensions](docs/extension-guide.md)
+- [Development, IDE debugging, and releases](docs/development.md)
+- [Verification record](docs/verification.md)
+
+## Development
+
+```sh
+python -m pip install -e ".[api,redis,dev]"
+python -m ruff check .
+python -m ruff format --check .
+python -m pytest -q
+```
+
+Redis integration tests require an isolated test server; setup is described in the [development guide](docs/development.md#local-checks). Without it, server-dependent tests are skipped.
+
+For contributions and issue reports, see [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), and [SECURITY.md](SECURITY.md).
+
+## License
+
+[Apache License 2.0](LICENSE). Attribution notices are in [NOTICE](NOTICE).

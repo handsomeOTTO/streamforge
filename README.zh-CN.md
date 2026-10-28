@@ -4,167 +4,143 @@
 
 [English](README.md) | **简体中文**
 
-一个 Python 检测与流式处理框架，提供严格的 Pydantic v2 数据契约、统一的处理器基类、可配置的 CVO 算子分支，以及完整的 Redis 输入到 Redis 输出工作流。
+StreamForge 是一个用于构建图像处理服务的 Python 框架。它在工作进程中运行可配置的算子链，协调并行分支，并通过 Redis 任务工作流返回结构化结果。
 
-工作流包含任务获取、图片读取、分发、处理、结果格式化与汇总、结果推出和运行控制。框架传递不透明的图片字节和有明确类型的检测结果。检测算法通过插件提供，不内置模型权重或推理实现。
+应用提供具体的处理算法，StreamForge 负责任务校验、队列、工作进程生命周期、结果汇总和服务控制。核心 SDK 也可以脱离 Redis，直接集成到 Python 应用或处理 JSONL 数据。
 
-系统全貌、进程边界、任务处理顺序、生命周期控制和恢复流程见[架构图与时序图](docs/architecture.md)。
+## 核心能力
 
-## 快速开始
+- **明确的数据契约**：图片、任务、算子参数、检测发现和结果均使用严格的 Pydantic 模型。
+- **多进程执行**：复用统一工作进程机制，通过有界队列和背压限制任务提交。
+- **可组合的算子**：支持顺序算子链、进程内资源钩子和显式插件注册。
+- **并行分支**：可配置各分支的工作进程数，按任务选择分支，并以固定顺序汇总结果。
+- **Redis 集成**：支持按 Key 取图、带确认的任务认领、正常／健康结果队列和显式恢复。
+- **服务控制**：通过 HTTP 接口管理启停、健康状态、版本和经过校验的配置更新。
 
-需要 Python 3.11 或更新版本。在仓库根目录使用 PowerShell 执行：
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e '.[api,redis,dev]'
-.\.venv\Scripts\python.exe examples/image_pipeline.py
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-如果只使用核心 SDK 和 JSONL 接口，可以执行 `pip install -e .`。Pydantic 是核心框架唯一的直接运行依赖。
-
-## 在 IDE 中直接启动与独立图像客户端
-
-直接 Debug 仓库根目录的 `main.py`，即可启动 Redis 任务服务、工作进程和 HTTP 控制接口，默认端口为 8001。在另一个 IDE 运行配置或终端中启动 `simulate_client.py`：客户端发送一张图片，等待对应结果，然后将返回图片和完整结果 JSON 保存到被 Git 忽略的 `outputs/` 目录。
-
-```powershell
-python main.py
-# Run separately after the service is ready.
-python simulate_client.py
-# Send your own image instead of the built-in synthetic PNG.
-python simulate_client.py --image C:\images\sample.png
-```
-
-两个脚本优先使用根目录的 `debug.local.json`；该文件不存在时使用 `examples/redis.json`，也可以通过 `--config PATH` 指定配置。配置中的 Redis 服务需要事先启动。客户端使用相同的队列配置，不会自行启动工作进程。要命中算子中的断点，需要启用子进程调试。具体操作见 [IDE 调试指南](docs/development.md#ide-debugging)。
-
-服务日志采用 `[timestamp][module][line][level]: message` 格式。每张图片在 INFO 级别输出一条 `↓ redis =>` 接收日志和一条 `↑ redis =>` 推出日志，包含任务标识和耗时；中间处理细节记录在 DEBUG 级别。无颜色的日志副本写入所选配置文件旁的 `logs/streamforge.log`，并按日轮转。
-
-## Redis 检测系统
-
-在配置的地址启动 Redis 6.2 或更新版本后，可使用以下入口：
-
-```powershell
-python examples/redis_demo.py --config examples/redis.json
-python examples/redis_roundtrip.py --config examples/redis.json
-python -m streamforge redis --config examples/redis.json
-python -m streamforge redis-serve --config examples/redis.json
-```
-
-浏览器演示位于 [localhost:8000](http://127.0.0.1:8000)，提供批量发送按钮、实时计数器、工作进程标识和实际 Redis 结果。`redis_roundtrip.py` 在终端中演示同一工作流，结束后清理本次演示创建的临时 Key。其余命令分别运行任务处理服务和 HTTP 控制接口。详见[运行指南](docs/redis-workflow.md)和[工作流说明](docs/workflow.md)。
-
-```text
-src/streamforge/
-  models.py, processor.py, worker.py, pipeline.py, operators.py
-  messages.py         任务、图片引用和结果消息的数据契约
-  application/
-    models.py         服务配置、运行状态和运行报告
-    configuration.py  具体插件参数配置与 OpenAPI Schema
-    service.py        TaskService：完整任务编排与背压控制
-    controller.py     ServiceController：启停与配置持久化
-    api.py            可选的 HTTP 系统控制接口
-  inspection/
-    models.py         检测发现、分支结果和检测汇总的类型定义
-    workflow.py       后台分发与按固定顺序执行的分支结果汇总
-  transports/redis/
-    models.py         Redis 连接、队列配置和恢复报告
-    transport.py      可恢复的任务认领、图片读取与带确认的结果发布
-```
-
-应用层管理处理生命周期；Redis 适配器负责数据库 I/O，并使用共享消息模型。Redis 是当前支持的运行后端。配置 JSON 定义连接参数、队列和处理分支。应用层与传输层的导入位置见[包结构说明](docs/development.md#package-layout)。
-
-处理分支可配置为按顺序执行的算子链。检测任务提交后会自行推进处理，无须等待消费者主动获取结果。默认注册表仅提供元数据处理；检测发现列表为空不代表质量合格。下方还提供了独立的通用输入输出入口。
-
-```powershell
-# Process each input line immediately, preserving image bytes.
-Get-Content -LiteralPath examples/images.jsonl | python -m streamforge run
-
-# Append generic metadata. The output file must not already exist.
-python -m streamforge run --input examples/images.jsonl --output results.jsonl --tag received
-
-# Start the optional HTTP adapter with two CVO workers.
-python -m streamforge serve --workers 2
-```
-
-HTTP 接口文档：[Swagger UI](http://127.0.0.1:8000/docs)。`GET /health` 返回运行状态；`POST /tasks` 提交任务并等待结果。
-
-## 数据契约
-
-```json
-{
-  "task_id": "frame-001",
-  "payload": {
-    "image": {"media_type": "image/png", "content_base64": "aW1hZ2U="},
-    "tags": []
-  }
-}
-```
-
-省略 `task_id` 时会自动生成标识。标识长度为 1～128 个字符，仅允许 ASCII 字母、数字、下划线、点和连字符。上方 Base64 仅用于说明传输格式；`examples/images.jsonl` 中提供了可运行的 PNG 任务。图片作为不透明字节传递，每张图片最大为 16 MiB。框架校验 Base64 编码，不检查图片字节是否符合声明的媒体格式。
-
-成功结果包含 `status="succeeded"`、有明确类型的 `payload` 和空值 `error`。失败结果包含 `status="failed"`、空值 `payload`，以及带有 `stage`、`error_type` 和 `message` 的错误信息。未知字段和隐式数值类型转换会被拒绝。JSON 是传输格式；SDK 接收模型实例。
-
-## SDK
-
-```python
-from streamforge import ImageData, ImagePayload, PipelineConfig, Task
-from streamforge.image import image_pipeline
-
-
-def main():
-    with image_pipeline(
-        config=PipelineConfig(queue_capacity=8, max_pending=16),
-        workers=2,
-    ) as pipeline:
-        image = ImageData.from_bytes(b"opaque-image-bytes", media_type="image/png")
-        task = Task[ImagePayload](payload=ImagePayload(image=image))
-        pipeline.submit(task, timeout=1.0)
-        result = pipeline.result(task.task_id, timeout=10.0)
-        print(result.status)
-
-
-if __name__ == "__main__":
-    main()
-```
-
-Windows 使用 `spawn` 启动子进程。请将应用执行入口放在 `if __name__ == "__main__"` 保护中，并在可导入模块的顶层定义处理器、参数模型和算子。导入包不会启动工作进程。
-
-核心框架支持任意具体的 `StrictModel` 负载。同一条流水线的所有阶段使用同一个负载 Schema；如需增加字段，请在自己的模型中明确声明。
-
-## 处理阶段与 CVO
-
-继承 `BaseProcessor[Payload, Parameters]`，声明 `parameters_model`，并实现 `process`。可选的 `setup/teardown` 钩子用于管理当前进程内的资源。框架统一提供队列循环、校验和错误处理。
-
-CVO 默认可用。空算子链原样传递图片；配置的算子按顺序执行。算子需要声明严格的参数模型并提供 `process(payload)`，可以使用普通类，也可以继承便捷基类。调度器不检查算子私有数据，也不加载图层、模板或工程文件。详见[扩展指南](docs/extension-guide.md)。
+## 工作方式
 
 ```mermaid
 flowchart LR
-    In[类型化输入] --> Q1[有界队列]
-    Q1 --> S1[阶段工作进程]
-    S1 --> Q2[有界队列]
-    Q2 --> CVO[CVO 算子链]
-    CVO --> Out[类型化结果]
+    Input[Redis 任务与图片] --> Dispatch[分支分发]
+    Dispatch --> Workers[算子工作进程池]
+    Workers --> Aggregate[结果汇总]
+    Aggregate --> Output[Redis 结果]
 ```
 
-## 并发与生命周期
+生产者先保存图片字节，再提交包含图片 Key 的任务。服务校验任务、读取图片，并将任务分发到指定分支。各分支按顺序执行自己的算子；所选分支全部完成后，服务合并分支状态和数据，发布一份任务结果。
 
-- `submit` 提交任务；`result(task_id)` 获取指定任务结果；`receive()` 获取下一个已完成结果。获取操作会消费结果并释放容量。
-- `max_pending` 限制处理中任务和已完成但尚未领取的结果总量。各阶段队列还有独立的容量限制。
-- 提交超时限制容量等待和入队等待时间；校验与序列化发生在该入队等待预算开始之前。Redis 服务另外设置了独立的任务处理超时。
-- `map(tasks)` 在有界窗口内预取任务，并按输入顺序返回结果。它要求独占流水线，且输入迭代器能够及时提供任务。对于稀疏实时输入，请使用 `submit/result` 或并发的 `submit/receive`。
-- JSONL 接口逐行处理并立即输出结果。如需同时处理多张图片，可使用 SDK 的 `map` 或并发 HTTP 请求。
-- 单个任务失败后会跳过后续处理阶段，其他任务仍继续处理。框架不提供自动重试，也不隐含“恰好一次”的副作用保证。
-- 初始化失败或工作进程意外退出会使流水线失败，并为未完成任务提供错误结果。
-- `discard(task_id)` 放弃结果并释放容量，不会中断已经运行的算子。内部调度标识可隔离任务标识复用后的迟到结果。
-- `close()` 排空各处理阶段并返回 `ShutdownReport`，其中包含流水线级错误。超时后会终止剩余工作进程，并将未完成任务标记为失败。上下文管理器会自动调用它；再次调用可以查看同一份报告。资源清理异常和进程异常退出会被报告为非正常关闭。
+| 概念 | 作用 |
+| --- | --- |
+| 算子 | 接收并返回类型化负载的一个处理步骤。 |
+| 算子链 | 由工作进程中的 `CVOProcessor` 顺序执行的一组算子。 |
+| 分支 | 独立配置的处理路径，拥有自己的工作进程池。 |
+| 检测发现 | 插件产生的观察结果，包含标签、置信度及可选的几何信息或测量项。 |
+| 任务结果 | 任务的成功／失败状态、负载或错误，以及各分支的汇总信息。 |
 
-HTTP 接口对校验错误返回 422，重复的在途任务标识返回 409，容量耗尽返回 429，等待结果超时返回 504，流水线不可用返回 503。处理过程中的任务失败使用 HTTP 200 返回有明确类型的失败结果。请求超时后会放弃对应结果以释放容量。每个应用生命周期独立管理一条流水线。
+进程边界和执行顺序见[架构图与时序图](docs/architecture.md)。
 
-## 范围与边界
+## 快速开始
 
-核心 `Pipeline` 提供顺序处理阶段；`InspectionWorkflow` 增加可配置的扇出／扇入分支；Redis 服务提供带可恢复认领的完整输入输出链路。系统仍以单台处理主机为边界，不包含通用 DAG 执行、分布式协调、Kafka 连接器、跨服务器事务或共享内存图片。修改活动工作进程的配置需要先停止再重建。Redis 恢复采用“至少一次”语义，不保证“恰好一次”。序列化会复制数据，Base64 也会增加体积，请根据实际负载设置容量。算子没有硬实时保证。
+需要 **Python 3.11 或更新版本**。请在 Python 虚拟环境中，从仓库根目录执行以下命令。
 
-## 社区与协作
+### 运行核心示例
 
-项目使用 [Apache-2.0](LICENSE) 许可证，归属声明见 [NOTICE](NOTICE)。另请参阅[贡献指南](CONTRIBUTING.md)、[行为准则](CODE_OF_CONDUCT.md)、[安全政策](SECURITY.md)和[变更记录](CHANGELOG.md)。
+```sh
+python -m pip install -e .
+python examples/image_pipeline.py
+```
 
-[开发指南](docs/development.md)说明检查与发布流程；[来源记录](docs/provenance.md)说明源码和依赖边界；[验证记录](docs/verification.md)区分了本地已执行的检查与尚未运行的托管 CI。
+该示例通过两个工作进程处理六个合成 PNG 任务，添加元数据标签并输出结果，无须启动 Redis 或 HTTP 服务。
+
+### 运行 Redis 服务
+
+需要 **Redis 6.2 或更新版本**，并安装服务依赖：
+
+```sh
+python -m pip install -e ".[api,redis]"
+```
+
+将 `examples/redis.json` 复制为 `redis.local.json`，修改其中的 Redis 连接参数。示例使用输入数据库 `0`、输出数据库 `1`，并配置一个包含内置标签算子的分支。在配置的地址启动 Redis 后，启动任务服务：
+
+```sh
+python main.py --config redis.local.json
+```
+
+在第二个终端发送一张示例图片，并等待返回结果：
+
+```sh
+python simulate_client.py --config redis.local.json
+```
+
+客户端将返回的图片和结果 JSON 保存到 `outputs/`。添加 `--image path/to/image.png` 可以发送本地图片。使用示例配置时，成功结果会包含 `processed` 标签，并保留输入图片的字节。
+
+控制接口文档位于 [localhost:8001/docs](http://127.0.0.1:8001/docs)。更新配置采用“停止 → 更新 → 启动”的顺序。连接设置、消息结构、任务恢复及浏览器演示见 [Redis 运行指南](docs/redis-workflow.md)。
+
+### 其他运行入口
+
+| 接口 | 命令 |
+| --- | --- |
+| JSONL 文件处理 | `python -m streamforge run --input examples/images.jsonl --output results.jsonl` |
+| 内存 HTTP 任务接口 | `python -m streamforge serve --workers 2` |
+| Redis 浏览器演示 | `python examples/redis_demo.py --config redis.local.json` |
+| Redis 终端全链路演示 | `python examples/redis_roundtrip.py --config redis.local.json` |
+
+JSONL 输出文件需要使用尚不存在的路径。HTTP 任务接口需要安装 `.[api]`；Redis 示例需要 `.[redis]`，浏览器演示还需要 `.[api]`。各服务示例应分别运行；内存 HTTP 接口和浏览器演示默认都使用 `8000` 端口。
+
+## 编写算子
+
+定义参数模型并实现 `process`，处理器基类负责配置和输出校验：
+
+```python
+from streamforge import BaseProcessor, ImagePayload, StrictModel
+
+
+class LabelParameters(StrictModel):
+    label: str
+
+
+class LabelOperator(BaseProcessor[ImagePayload, LabelParameters]):
+    parameters_model = LabelParameters
+
+    def process(self, payload: ImagePayload) -> ImagePayload:
+        return payload.model_copy(update={"tags": [*payload.tags, self.parameters.label]})
+```
+
+在应用入口按名称注册算子，然后在分支配置中引用它。算子也可以采用普通类，只要满足相同的参数与处理契约即可。可选的 `setup` 和 `teardown` 钩子用于管理工作进程内部的资源。
+
+注册、自定义处理阶段、私有中间数据及类型化检测结果的用法见[扩展指南](docs/extension-guide.md)。处理器和算子类需要定义在模块顶层；应用执行代码应放在 `if __name__ == "__main__"` 保护中，以便工作进程通过 `spawn` 启动。
+
+## 运行机制与边界
+
+- 处理运行在单台主机上。不同分支可以并发执行，各工作进程按顺序执行单个任务的算子链。
+- 队列容量和待领取结果数量共同限制任务提交；消费者较慢时会形成背压。
+- 图片按不透明的编码字节传递，每张图片最大 **16 MiB**。解码和分析由算子负责，框架不内置推理模型或检测算法。
+- 分支失败会产生结构化结果；仅当所有选中分支均成功时，任务才成功。检测发现列表为空本身不代表质量合格。
+- Redis 采用“**至少一次**”投递语义。跨数据库发布过程中发生中断可能产生重复结果，消费者和有副作用的算子需要容忍重放。
+- 关闭服务时，在配置的时间预算内排空已接收任务。如果处理中列表仍有认领记录，需要先停止其服务拥有者，执行显式恢复命令，再重新启动。详见[恢复语义](docs/redis-workflow.md#delivery-and-recovery)。
+
+## 文档
+
+- [架构图与时序图](docs/architecture.md)
+- [任务工作流与模块职责](docs/workflow.md)
+- [Redis 配置、消息与恢复](docs/redis-workflow.md)
+- [处理阶段与算子扩展](docs/extension-guide.md)
+- [开发、IDE 调试与发布](docs/development.md)
+- [验证记录](docs/verification.md)
+
+## 参与开发
+
+```sh
+python -m pip install -e ".[api,redis,dev]"
+python -m ruff check .
+python -m ruff format --check .
+python -m pytest -q
+```
+
+Redis 集成测试需要独立的测试服务器，配置方法见[开发指南](docs/development.md#local-checks)。未提供测试服务器时，依赖服务器的测试会被跳过。
+
+贡献代码或报告问题前，请阅读[贡献指南](CONTRIBUTING.md)、[行为准则](CODE_OF_CONDUCT.md)和[安全政策](SECURITY.md)。
+
+## 许可证
+
+[Apache License 2.0](LICENSE)，归属声明见 [NOTICE](NOTICE)。
